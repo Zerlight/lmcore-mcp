@@ -188,10 +188,10 @@ async function connectWhenReady(port: number): Promise<Browser> {
   throw new Error(`Chrome did not open its debugging port. ${String(lastError)}`);
 }
 
-/** Polls open tabs until one reaches the configured Moodle host past all login screens. */
+/** Waits for a fully loaded Moodle page with an authenticated user menu. */
 async function waitForLogin(browser: Browser, options: LoginOptions): Promise<void> {
   const deadline = Date.now() + 5 * 60_000;
-  let prompted = false;
+  const origin = new URL(BASE_URL).origin;
   while (Date.now() < deadline) {
     for (const page of await browser.pages()) {
       const url = page.url();
@@ -202,10 +202,22 @@ async function waitForLogin(browser: Browser, options: LoginOptions): Promise<vo
       } catch {
         continue;
       }
-      if (host === SITE_HOST && !isLoginUrl(url)) return;
-    }
-    if (!prompted && Date.now() + 4 * 60_000 < deadline) {
-      prompted = true;
+      if (host !== SITE_HOST || isLoginUrl(url)) continue;
+      try {
+        const authenticated = await page.evaluate((expectedUrl: string, expectedOrigin: string) => {
+          if (location.href !== expectedUrl || location.origin !== expectedOrigin || document.readyState !== "complete") return false;
+          if (document.body?.classList.contains("notloggedin") || document.querySelector('form#login, form[action*="/login/"], input[type="password"]')) return false;
+          const menu = document.querySelector(".usermenu");
+          if (!menu?.querySelector("#user-menu-toggle, .userbutton")) return false;
+          return [...menu.querySelectorAll<HTMLAnchorElement>("a[href]")].some((link) => {
+            const target = new URL(link.href, location.href);
+            return target.origin === expectedOrigin && target.pathname.endsWith("/login/logout.php");
+          });
+        }, url, origin);
+        if (authenticated && page.url() === url) return;
+      } catch {
+        // SSO navigation can replace the execution context between checks.
+      }
     }
     await delay(1000);
   }

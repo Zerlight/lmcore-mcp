@@ -8,14 +8,21 @@ import test from "node:test";
 
 let moduleId = 0;
 
-async function loadSession(t, { baseUrl = "https://moodle.example.edu:8443", cookies = [], spawn } = {}) {
+async function loadSession(t, {
+  baseUrl = "https://moodle.example.edu:8443", cookies = [], spawn,
+  evaluate = async () => true, url = () => `${baseUrl}/my/`, pages,
+} = {}) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "lmcore-session-test-"));
   const sessionPath = path.join(directory, "session.json");
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
-  const state = { killed: false, disconnected: false, profile: undefined, connectCalls: 0 };
+  const state = { killed: false, disconnected: false, profile: undefined, connectCalls: 0, cookieReads: 0 };
   const page = {
-    url: () => `${baseUrl}/my/`,
-    createCDPSession: async () => ({ send: async () => ({ cookies }) }),
+    url,
+    evaluate,
+    createCDPSession: async () => ({ send: async () => {
+      state.cookieReads++;
+      return { cookies };
+    } }),
   };
   t.mock.module(new URL("../build/config.js", import.meta.url).href, {
     exports: {
@@ -32,7 +39,7 @@ async function loadSession(t, { baseUrl = "https://moodle.example.edu:8443", coo
         connect: async () => {
           state.connectCalls++;
           return {
-            pages: async () => [page],
+            pages: pages ?? (async () => [page]),
             disconnect: async () => { state.disconnected = true; },
           };
         },
@@ -73,6 +80,12 @@ function cookie(name, domain) {
   return { name, domain, value: "test-value", path: "/", expires: -1, httpOnly: true, secure: true };
 }
 
+function deferred() {
+  let resolve;
+  const promise = new Promise((complete) => { resolve = complete; });
+  return { promise, resolve };
+}
+
 test("login retains only cookies applicable to the configured Moodle host", async (t) => {
   const { session, state, sessionPath } = await loadSession(t, {
     cookies: [
@@ -108,6 +121,110 @@ test("XJTLU login also keeps SSO cookies without accepting similarly named domai
   });
   const saved = await session.interactiveLogin({ log: () => {} });
   assert.deepEqual(saved.cookies.map(({ name }) => name), ["MoodleSession", "sso", "shared"]);
+});
+
+test("login keeps Chrome open for a guest session until authentication is confirmed", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const checked = deferred();
+  let authenticated = false;
+  const { session, state, sessionPath } = await loadSession(t, {
+    cookies: [cookie("MoodleSession", "moodle.example.edu")],
+    evaluate: async () => {
+      checked.resolve();
+      return authenticated;
+    },
+  });
+  const login = session.interactiveLogin({ log: () => {} });
+  await checked.promise;
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(state.cookieReads, 0);
+  assert.equal(state.disconnected, false);
+  assert.equal(state.killed, false);
+  assert.equal(fs.existsSync(sessionPath), false);
+  assert.equal(fs.existsSync(state.profile), true);
+
+  authenticated = true;
+  t.mock.timers.tick(1000);
+  const saved = await login;
+  assert.equal(saved.cookies[0].name, "MoodleSession");
+  assert.equal(state.cookieReads, 1);
+  assert.equal(state.killed, true);
+  assert.equal(fs.existsSync(sessionPath), true);
+});
+
+test("login retries when navigation destroys the page execution context", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const checked = deferred();
+  let attempts = 0;
+  const { session, state } = await loadSession(t, {
+    cookies: [cookie("MoodleSession", "moodle.example.edu")],
+    evaluate: async () => {
+      if (++attempts === 1) {
+        checked.resolve();
+        throw new Error("Execution context was destroyed, most likely because of a navigation.");
+      }
+      return true;
+    },
+  });
+  const login = session.interactiveLogin({ log: () => {} });
+  await checked.promise;
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(state.killed, false);
+  assert.equal(state.cookieReads, 0);
+  t.mock.timers.tick(1000);
+  await login;
+  assert.equal(attempts, 2);
+  assert.equal(state.cookieReads, 1);
+});
+
+test("login ignores an authentication result from a page that navigated during evaluation", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const checked = deferred();
+  let currentUrl = "https://moodle.example.edu:8443/my/";
+  let attempts = 0;
+  const { session, state, sessionPath } = await loadSession(t, {
+    cookies: [cookie("MoodleSession", "moodle.example.edu")],
+    url: () => currentUrl,
+    evaluate: async () => {
+      if (++attempts === 1) {
+        currentUrl = "https://sso.example.edu/sign-in";
+        checked.resolve();
+      }
+      return true;
+    },
+  });
+  const login = session.interactiveLogin({ log: () => {} });
+  await checked.promise;
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(state.cookieReads, 0);
+  assert.equal(state.killed, false);
+  assert.equal(fs.existsSync(sessionPath), false);
+  currentUrl = "https://moodle.example.edu:8443/my/";
+  t.mock.timers.tick(1000);
+  await login;
+  assert.equal(attempts, 2);
+  assert.equal(state.cookieReads, 1);
+});
+
+test("login timeout preserves the previously saved session", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
+  const checked = deferred();
+  const { session, state, sessionPath } = await loadSession(t, {
+    cookies: [cookie("MoodleSession", "moodle.example.edu")],
+    evaluate: async () => { checked.resolve(); return false; },
+  });
+  const previousSession = JSON.stringify({ format: "lmcore-mcp/session", cookies: [cookie("MoodleSession", "moodle.example.edu")] });
+  fs.writeFileSync(sessionPath, previousSession, { mode: 0o600 });
+  const login = assert.rejects(session.interactiveLogin({ log: () => {} }), /Timed out waiting for login/);
+  await checked.promise;
+  await new Promise((resolve) => setImmediate(resolve));
+  t.mock.timers.tick(5 * 60_000);
+  await login;
+  assert.equal(fs.readFileSync(sessionPath, "utf8"), previousSession);
+  assert.equal(state.cookieReads, 0);
+  assert.equal(state.disconnected, true);
+  assert.equal(state.killed, true);
+  assert.equal(fs.existsSync(state.profile), false);
 });
 
 test("login failure disconnects the browser and removes its temporary profile", async (t) => {
