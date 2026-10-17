@@ -49,6 +49,7 @@ async function loadSession(t, {
   t.mock.module("node:child_process", {
     exports: {
       spawn: (executable, args, options) => {
+        assert.ok(args.includes("--disable-http2"));
         state.profile = args.find((arg) => arg.startsWith("--user-data-dir=")).split("=")[1];
         if (spawn) return spawn(executable, args, options);
         const child = new EventEmitter();

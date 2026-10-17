@@ -70,6 +70,8 @@ pnpm run login
 
 当 Moodle 会话过期时，工具调用会返回明确提示，届时重新运行 `pnpm run login` 即可。
 
+交互式登录浏览器会禁用 HTTP/2，避免 SSO 跳转时跨域复用连接。后续 MCP 工具调用仍使用 Chrome 默认的协议协商方式。
+
 ### 3. 配置 MCP 客户端
 
 将 `lmcore` 添加到 MCP 客户端的 stdio 服务器配置中（如 `claude_desktop_config.json` 或 `.mcp.json`）：

@@ -70,6 +70,10 @@ pnpm run login
 
 When your Moodle session eventually expires, tools will prompt you to run `pnpm run login` again.
 
+HTTP/2 is disabled in the interactive login browser to avoid cross-origin
+connection reuse during SSO redirects. Subsequent MCP tool calls use Chrome's
+default protocol negotiation.
+
 ### 3. Configure Your MCP Client
 
 Add `lmcore` to your MCP client's stdio server configuration (e.g., `claude_desktop_config.json` or `.mcp.json`):

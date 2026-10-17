@@ -113,6 +113,8 @@ export async function interactiveLogin(options: LoginOptions): Promise<StoredSes
         `--remote-debugging-port=${debuggingPort}`,
         "--no-first-run",
         "--no-default-browser-check",
+        // Avoid cross-origin HTTP/2 connection reuse during SSO redirects.
+        "--disable-http2",
         `${BASE_URL}/my/`,
       ],
       { stdio: "ignore" },
