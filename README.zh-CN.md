@@ -141,6 +141,6 @@ pnpm typecheck
 pnpm test
 ```
 
-回归测试全部基于合成的会话、页面 HTML 与测试文档运行，不会读取本地真实登录态，也不会向 Learning Mall 发起网络请求。浏览器相关测试需要本地安装有 Chrome。
+回归测试全部基于合成的会话、页面 HTML 与测试文档运行，不会读取本地真实登录态，也不会向 Learning Mall 发起网络请求。浏览器相关测试需要本地安装 Chrome，并在 `PATH` 中提供 `openssl`，用于生成临时的本机 TLS 测试证书。
 
 GitHub Actions 在 Linux 上运行合成会话回归测试，不会通过 SSO 登录，也不验证真实 Learning Mall 会话。

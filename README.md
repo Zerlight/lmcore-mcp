@@ -143,6 +143,6 @@ pnpm typecheck
 pnpm test
 ```
 
-The test suite runs against synthetic sessions, HTML fixtures, and generated PDF/OOXML test files without reading your saved session or contacting Learning Mall Core. Browser integration tests require a local Chrome installation.
+The test suite runs against synthetic sessions, HTML fixtures, and generated PDF/OOXML test files without reading your saved session or contacting Learning Mall Core. Browser integration tests require a local Chrome installation and `openssl` on `PATH` to generate temporary localhost TLS certificates.
 
 GitHub Actions runs the synthetic-session regression suite on Linux. It does not sign in through SSO or verify a real Learning Mall session.
