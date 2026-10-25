@@ -50,6 +50,8 @@ mock.module("node:child_process", {
     spawn: (_executable, args) => {
       chromeArguments = args;
       const child = new EventEmitter();
+      const profile = args.find((arg) => arg.startsWith("--user-data-dir=")).split("=")[1];
+      fs.writeFileSync(path.join(profile, "DevToolsActivePort"), "9222\n/devtools/browser/fixture");
       child.pid = 12345;
       child.exitCode = null;
       child.signalCode = null;

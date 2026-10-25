@@ -31,12 +31,13 @@ export class SessionExpiredError extends Error {
 
 function readSession(): StoredSession {
   let raw: string;
+  let parsed: StoredSession;
   try {
     raw = fs.readFileSync(SESSION_PATH, "utf8");
+    parsed = JSON.parse(raw) as StoredSession;
   } catch {
     throw new SessionExpiredError();
   }
-  const parsed = JSON.parse(raw) as StoredSession;
   if (parsed.format !== FORMAT || !Array.isArray(parsed.cookies)) throw new SessionExpiredError();
   return parsed;
 }
@@ -103,14 +104,14 @@ export interface LoginOptions {
  */
 export async function interactiveLogin(options: LoginOptions): Promise<StoredSession> {
   const profile = fs.mkdtempSync(path.join(os.tmpdir(), "lmcore-login-"));
-  const debuggingPort = 9222 + Math.floor(Math.random() * 1000);
   let chrome: ReturnType<typeof spawn> | undefined;
   try {
     const child = spawn(
       CHROME_PATH,
       [
         `--user-data-dir=${profile}`,
-        `--remote-debugging-port=${debuggingPort}`,
+        // Chrome writes the allocated port to <profile>/DevToolsActivePort.
+        "--remote-debugging-port=0",
         "--no-first-run",
         "--no-default-browser-check",
         // Avoid cross-origin HTTP/2 connection reuse during SSO redirects.
@@ -126,7 +127,7 @@ export async function interactiveLogin(options: LoginOptions): Promise<StoredSes
     });
     options.log("Chrome window opened. Please sign in with your XJTLU account.");
     options.log("Waiting for authentication to complete...");
-    const browser = await connectWhenReady(debuggingPort);
+    const browser = await connectWhenReady(path.join(profile, "DevToolsActivePort"));
     try {
       await waitForLogin(browser, options);
       const cookies = await collectCookies(browser);
@@ -176,12 +177,16 @@ async function stopChrome(chrome: ReturnType<typeof spawn>): Promise<void> {
 }
 
 /** Polls Chrome's DevTools port until the browser is ready to accept connections. */
-async function connectWhenReady(port: number): Promise<Browser> {
+async function connectWhenReady(portFile: string): Promise<Browser> {
   const deadline = Date.now() + 30_000;
   let lastError: unknown;
   while (Date.now() < deadline) {
     try {
-      return await puppeteer.connect({ browserURL: `http://127.0.0.1:${port}` });
+      const port = Number(fs.readFileSync(portFile, "utf8").split("\n", 1)[0]);
+      if (Number.isInteger(port) && port > 0 && port <= 65_535) {
+        return await puppeteer.connect({ browserURL: `http://127.0.0.1:${port}` });
+      }
+      throw new Error("Chrome did not report a valid debugging port.");
     } catch (error) {
       lastError = error;
       await delay(300);

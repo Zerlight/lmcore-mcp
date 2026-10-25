@@ -211,7 +211,11 @@ function saveFile(name: string, data: Buffer): string {
 
 function fileName(url: string): string {
   const last = new URL(url).pathname.split("/").pop() ?? "";
-  return decodeURIComponent(last);
+  try {
+    return decodeURIComponent(last);
+  } catch {
+    return last;
+  }
 }
 
 interface Extracted {

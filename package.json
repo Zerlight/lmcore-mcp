@@ -3,6 +3,14 @@
   "version": "0.1.0",
   "description": "Read-only MCP server for XJTLU Learning Mall Core (core.xjtlu.edu.cn), authenticated with a browser session.",
   "type": "module",
+  "license": "UNLICENSED",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Zerlight/lmcore-mcp.git"
+  },
+  "files": [
+    "build"
+  ],
   "bin": {
     "lmcore-mcp": "./build/index.js"
   },

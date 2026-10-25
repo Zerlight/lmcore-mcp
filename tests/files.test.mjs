@@ -111,6 +111,14 @@ test("only configured-origin resource URLs are accepted and HTTP errors remain e
   await assert.rejects(readFiles(resource(6, { url: "https://unrelated.test/file.txt" })), /outside the configured Moodle site/);
 });
 
+test("invalid percent-encoding in a URL filename falls back to the raw name", async () => {
+  const result = await readFiles(resource(17, {
+    url: `${origin}/pluginfile.php/4/100%ZZ-broken-name.txt`,
+    data: Buffer.from("bad encoding"),
+  }));
+  assert.equal(result.files[0].name, "100%ZZ-broken-name.txt");
+});
+
 test("PPTX uses the presentation relationship order rather than lexical or numeric filenames", async () => {
   const order = [4, 1, 12, 2, 10, 3, 11, 5, 9, 7, 6, 8];
   const result = await readFiles(resource(7, {

@@ -50,7 +50,9 @@ async function loadSession(t, {
     exports: {
       spawn: (executable, args, options) => {
         assert.ok(args.includes("--disable-http2"));
+      assert.ok(args.includes("--remote-debugging-port=0"));
         state.profile = args.find((arg) => arg.startsWith("--user-data-dir=")).split("=")[1];
+      fs.writeFileSync(path.join(state.profile, "DevToolsActivePort"), "9222\n/devtools/browser/test");
         if (spawn) return spawn(executable, args, options);
         const child = new EventEmitter();
         child.pid = 12345;
@@ -235,6 +237,12 @@ test("login failure disconnects the browser and removes its temporary profile", 
   assert.equal(state.killed, true);
   assert.equal(fs.existsSync(state.profile), false);
   assert.equal(fs.existsSync(sessionPath), false);
+});
+
+test("invalid session JSON reports an expired session", async (t) => {
+  const { session, sessionPath } = await loadSession(t);
+  fs.writeFileSync(sessionPath, "{ broken", { mode: 0o600 });
+  assert.throws(() => session.rememberUser(1, "Student"), session.SessionExpiredError);
 });
 
 test("remembering a user replaces a readable session with a private file", async (t) => {
