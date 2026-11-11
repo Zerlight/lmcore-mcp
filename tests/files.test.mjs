@@ -44,7 +44,7 @@ after(() => {
   osMock.restore();
   fs.rmSync(testHome, { recursive: true, force: true });
 });
-const { readFiles } = await import("../build/files.js");
+const { folderFilePath, listFolder, readFiles } = await import("../build/files.js");
 
 function resource(id, fixture) {
   const url = `${origin}/mod/resource/view.php?id=${id}`;
@@ -105,7 +105,7 @@ test("only configured-origin resource URLs are accepted and HTTP errors remain e
     "http://files.moodle.test/mod/resource/view.php?id=1",
     `${origin}/pluginfile.php/4/file.txt`,
   ]) {
-    await assert.rejects(readFiles(url), /Only resource links/);
+    await assert.rejects(readFiles(url), /Only resource or folder file links/);
   }
   await assert.rejects(readFiles(resource(5, { status: 404 })), /HTTP 404/);
   await assert.rejects(readFiles(resource(6, { url: "https://unrelated.test/file.txt" })), /outside the configured Moodle site/);
@@ -198,4 +198,65 @@ test("long text is capped with an explicit truncation note", async () => {
   }));
   assert.equal(result.files[0].text.length, 60_000);
   assert.match(result.files[0].note, /truncat|60,?000|limit/i);
+});
+
+test("folder activity URLs are rejected with a pointer to lmcore_folder", async () => {
+  await assert.rejects(
+    readFiles(`${origin}/mod/folder/view.php?id=55396`),
+    /listed with lmcore_folder/,
+  );
+});
+
+test("folder pluginfile URLs are fetched once and extracted like resources", async () => {
+  const url = `${origin}/pluginfile.php/10/mod_folder/content/0/Week9/README.md`;
+  responses.set(url, {
+    mime: "text/markdown",
+    data: Buffer.from("# Lab setup\nBring your laptop."),
+    headers: { "content-disposition": 'inline; filename="README.md"' },
+  });
+  const count = requests.length;
+  const beforeClosed = closed;
+  const result = await readFiles(url);
+  assert.equal(result.activity, "README.md");
+  assert.equal(result.files[0].name, "README.md");
+  assert.equal(result.files[0].text, "# Lab setup\nBring your laptop.");
+  assert.equal(requests.length - count, 1);
+  assert.equal(closed - beforeClosed, 1);
+});
+
+test("slash-argument-less folder pluginfile URLs and nested paths are accepted", async () => {
+  const url = `${origin}/pluginfile.php?file=/10/mod_folder/content/0/Week9/notes/intro.txt`;
+  responses.set(url, { mime: "text/plain", data: Buffer.from("Nested notes.") });
+  const result = await readFiles(url);
+  assert.equal(result.files[0].text, "Nested notes.");
+  assert.equal(folderFilePath(new URL(url)), "Week9/notes/intro.txt");
+});
+
+test("preview thumbnails and foreign pluginfile URLs are not treated as folder files", async () => {
+  await assert.rejects(
+    readFiles(`${origin}/pluginfile.php/10/mod_folder/content/0/photo.png?preview=tinyicon`),
+    /Only resource or folder file links/,
+  );
+  await assert.rejects(
+    readFiles("https://unrelated.test/pluginfile.php/10/mod_folder/content/0/README.md"),
+    /Only resource or folder file links/,
+  );
+});
+
+test("listFolder requires a same-site folder URL or a positive id", async () => {
+  await assert.rejects(listFolder({}), /folder URL or id/);
+  await assert.rejects(listFolder({ id: 0 }), /positive folder course-module id/);
+  await assert.rejects(listFolder({ url: "not a url" }), /Not a valid URL/);
+  await assert.rejects(
+    listFolder({ url: `${origin}/mod/resource/view.php?id=1` }),
+    /Only folder links/,
+  );
+  await assert.rejects(
+    listFolder({ url: `${origin}/mod/folder/view.php` }),
+    /missing a valid id/,
+  );
+  await assert.rejects(
+    listFolder({ url: `${origin}/mod/folder/view.php?id=9`, id: 10 }),
+    /different activities/,
+  );
 });

@@ -13,6 +13,7 @@ cookies*.json
 cookies*.txt
 *.har
 downloads/
+logs/
 lmcore-login-*/
 *.log
 *.tgz

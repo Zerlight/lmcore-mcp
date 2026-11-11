@@ -106,7 +106,8 @@ Downloaded files and `savedTo` paths belong to the machine running the MCP serve
 | `lmcore_courses` | — | List enrolled courses grouped by status (`inprogress`, `future`, `past`), including each course's `courseId`. |
 | `lmcore_deadlines` | `days?` *(1–180, default `21`)* | List upcoming action events (assignments, quizzes, choices) across all courses. Timestamps use `Asia/Shanghai`. |
 | `lmcore_course_contents` | `courseId` | List all sections and activities in a course, including activity type, link, and completion status. |
-| `lmcore_read_file` | `url`, `download?` *(default `false`)* | Extract Markdown/text from a course `mod/resource` file (PDF, PPTX, DOCX, TXT/MD/CSV), or save the original file locally when `download: true`. |
+| `lmcore_folder` | `url?`, `id?` *(provide one)* | List the files in a `mod/folder` activity (name, path, size when shown, and file URL). Pass a returned file URL to `lmcore_read_file`. |
+| `lmcore_read_file` | `url`, `download?` *(default `false`)* | Extract Markdown/text from a course `mod/resource` file or a folder file URL from `lmcore_folder` (PDF, PPTX, DOCX, TXT/MD/CSV), or save the original file locally when `download: true`. |
 | `lmcore_assignments` | `courseId` | List all assignments in a course with due dates, submission status, and grades. |
 | `lmcore_grades` | `courseId` | Fetch the user grade report (grades, ranges, percentages, and feedback) for a course. |
 | `lmcore_notifications` | `limit?` *(1–50, default `10`)* | Fetch the unread notification count and most recent notifications. |
@@ -114,7 +115,7 @@ Downloaded files and `savedTo` paths belong to the machine running the MCP serve
 ### How Data Is Fetched
 
 - **Moodle AJAX API** (`lmcore_courses`, `lmcore_deadlines`, `lmcore_notifications`): Calls `/lib/ajax/service.php` using the active browser session's `sesskey`.
-- **DOM Extraction** (`lmcore_course_contents`, `lmcore_assignments`, `lmcore_grades`): Parses the server-rendered Moodle pages directly, since the corresponding web service methods are restricted for student browser sessions.
+- **DOM Extraction** (`lmcore_course_contents`, `lmcore_folder`, `lmcore_assignments`, `lmcore_grades`): Parses the server-rendered Moodle pages directly, since the corresponding web service methods are restricted for student browser sessions.
 - Each tool call opens a short-lived headless Chrome instance, which typically takes a few seconds.
 
 ## Document Reading & Extraction Limits

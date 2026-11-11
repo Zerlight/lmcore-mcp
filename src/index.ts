@@ -2,7 +2,7 @@
 import { McpServer } from "@modelcontextprotocol/server";
 import { StdioServerTransport } from "@modelcontextprotocol/server/stdio";
 import { z } from "zod";
-import { readFiles } from "./files.js";
+import { listFolder, readFiles } from "./files.js";
 import { assignments, courseContents, grades, listCourses, notifications, upcomingDeadlines } from "./moodle.js";
 import { failure, formatTime, relativeTime } from "./format.js";
 
@@ -85,12 +85,38 @@ server.registerTool(
 );
 
 server.registerTool(
+  "lmcore_folder",
+  {
+    description:
+      "List the files in a Moodle `mod/folder` activity, including each file's name, path within the folder, size when shown on the page, and the file URL to pass to lmcore_read_file. Accepts the folder URL from lmcore_course_contents or the folder's course-module id.",
+    inputSchema: {
+      url: z.string().optional().describe("Folder activity URL (`/mod/folder/view.php?id=...`) from lmcore_course_contents."),
+      id: z.number().int().positive().optional().describe("Folder course-module ID (the `id` query parameter of the folder URL)."),
+    },
+    annotations: readOnly,
+  },
+  async ({ url, id }) => {
+    try {
+      const result = await listFolder({ url, id });
+      return { content: [{ type: "text" as const, text: JSON.stringify({
+        activity: result.activity,
+        count: result.files.length,
+        downloadUrl: result.downloadUrl,
+        files: result.files,
+      }, null, 2) }] };
+    } catch (error) {
+      return failure(error);
+    }
+  },
+);
+
+server.registerTool(
   "lmcore_read_file",
   {
     description:
-      "Read a file from a `mod/resource` URL returned by lmcore_course_contents. PDF, PowerPoint, and Word files are converted locally to Markdown (capped at 60,000 characters). Built-in extraction has limited accuracy: OCR is disabled, and images, complex tables, formulas, or layout order may be incomplete. If your client supports direct document or multimodal input, set download to true to save the original file locally and read `savedTo` with your own tools (downloading does not attach the file to the model automatically).",
+      "Read a file from a `mod/resource` URL returned by lmcore_course_contents, or a folder file URL (`/pluginfile.php/.../mod_folder/content/...`) returned by lmcore_folder. PDF, PowerPoint, and Word files are converted locally to Markdown (capped at 60,000 characters). Built-in extraction has limited accuracy: OCR is disabled, and images, complex tables, formulas, or layout order may be incomplete. If your client supports direct document or multimodal input, set download to true to save the original file locally and read `savedTo` with your own tools (downloading does not attach the file to the model automatically).",
     inputSchema: {
-      url: z.string().describe("Resource activity URL (`/mod/resource/view.php?id=...`) from lmcore_course_contents."),
+      url: z.string().describe("Resource activity URL (`/mod/resource/view.php?id=...`) from lmcore_course_contents, or a file URL from lmcore_folder."),
       download: z
         .boolean()
         .default(false)

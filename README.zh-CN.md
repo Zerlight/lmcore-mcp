@@ -104,7 +104,8 @@ Agent 宿主可以在受支持的 Linux 架构上，将构建后的服务器作�
 | `lmcore_courses` | — | 获取当前账号已注册的课程列表，按时间线状态（`inprogress`、`future`、`past`）分组，并返回其他工具所需的 `courseId`。 |
 | `lmcore_deadlines` | `days?` *(1–180，默认 `21`)* | 查询未来 `days` 天内所有课程的待办截止事件（作业、测验、投票等），时间统一采用 `Asia/Shanghai` 时区。 |
 | `lmcore_course_contents` | `courseId` | 获取指定课程的章节目录与教学活动列表，包含名称、类型、链接及完成状态。 |
-| `lmcore_read_file` | `url`, `download?` *(默认 `false`)* | 读取 `lmcore_course_contents` 返回的 `mod/resource` 课件资源。默认在本地将 PDF、PPTX、DOCX 解析为 Markdown；若设置 `download: true` 则将原文件保存至本地并返回路径。 |
+| `lmcore_folder` | `url?`, `id?` *(二者提供其一)* | 列出 `mod/folder` 文件夹活动中的文件（名称、路径、页面上显示的大小，以及可供 `lmcore_read_file` 使用的文件 URL）。 |
+| `lmcore_read_file` | `url`, `download?` *(默认 `false`)* | 读取 `lmcore_course_contents` 返回的 `mod/resource` 课件，或 `lmcore_folder` 返回的文件夹文件 URL。默认在本地将 PDF、PPTX、DOCX 解析为 Markdown；若设置 `download: true` 则将原文件保存至本地并返回路径。 |
 | `lmcore_assignments` | `courseId` | 获取指定课程的所有作业列表，包含截止时间、提交状态及评分。 |
 | `lmcore_grades` | `courseId` | 获取指定课程的个人成绩单明细（得分、满分范围、百分比及教师评语）。 |
 | `lmcore_notifications` | `limit?` *(1–50，默认 `10`)* | 获取未读通知数量及最近的系统通知列表。 |
@@ -112,7 +113,7 @@ Agent 宿主可以在受支持的 Linux 架构上，将构建后的服务器作�
 ### 数据获取机制
 
 - **Moodle AJAX 接口**（`lmcore_courses`、`lmcore_deadlines`、`lmcore_notifications`）：复用页面中的 `sesskey` 直接调用 `/lib/ajax/service.php` 并解析返回的 JSON。
-- **页面 DOM 解析**（`lmcore_course_contents`、`lmcore_assignments`、`lmcore_grades`）：由于站点禁止学生浏览器会话直接调用相关 Web Service 方法，这部分数据直接从服务端渲染的页面 DOM 中提取。
+- **页面 DOM 解析**（`lmcore_course_contents`、`lmcore_folder`、`lmcore_assignments`、`lmcore_grades`）：由于站点禁止学生浏览器会话直接调用相关 Web Service 方法，这部分数据直接从服务端渲染的页面 DOM 中提取。
 - 每次工具调用都会启动一个短暂的无头 Chrome 实例，单次耗时通常在数秒左右。
 
 ## 文档解析与限制说明

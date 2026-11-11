@@ -9,7 +9,38 @@ import { gotoAuthed, openSession, SessionExpiredError } from "./session.js";
 
 /** Path pattern for Moodle file resource activities. */
 const RESOURCE_PATH = /^\/mod\/resource\/view\.php$/;
+/** Path pattern for Moodle folder activities. */
+const FOLDER_PATH = /^\/mod\/folder\/view\.php$/;
 const SITE_ORIGIN = new URL(BASE_URL).origin;
+
+function isFolderContentPath(path: string): boolean {
+  return /(?:^|\/)mod_folder\/content(?:\/|$)/.test(path);
+}
+
+/** True when `url` is a same-site pluginfile belonging to a folder activity. */
+function isFolderFileUrl(url: URL): boolean {
+  if (url.origin !== SITE_ORIGIN) return false;
+  if (url.pathname.startsWith("/pluginfile.php/")) return isFolderContentPath(url.pathname);
+  if (url.pathname === "/pluginfile.php") return isFolderContentPath(url.searchParams.get("file") ?? "");
+  return false;
+}
+
+/** Relative path of a folder file inside the activity (decoded, no leading slash). */
+export function folderFilePath(url: URL): string {
+  const raw = url.pathname.startsWith("/pluginfile.php/")
+    ? url.pathname
+    : (url.searchParams.get("file") ?? "");
+  const parts = raw.split("/").filter(Boolean).map((part) => {
+    try {
+      return decodeURIComponent(part);
+    } catch {
+      return part;
+    }
+  });
+  const index = parts.findIndex((part, i) => part === "mod_folder" && parts[i + 1] === "content");
+  if (index === -1) return parts.at(-1) ?? "";
+  return parts.slice(index + 3).join("/");
+}
 
 export interface CourseFile {
   name: string;
@@ -31,45 +62,193 @@ export interface FileReadResult {
   files: CourseFile[];
 }
 
+export interface FolderEntry {
+  name: string;
+  /** Path of the file inside the folder, including any subdirectories. */
+  path: string;
+  url: string;
+  /** Human-readable size when Moodle shows it on the folder page. */
+  size?: string;
+}
+
+export interface FolderListing {
+  /** Folder activity title. */
+  activity: string;
+  files: FolderEntry[];
+  /** "Download folder" zip URL, when Moodle exposes one. */
+  downloadUrl?: string;
+}
+
 /** User-local directory where downloaded source files are saved. */
 const DOWNLOAD_DIR = path.join(os.homedir(), ".config", "lmcore-mcp", "downloads");
 
 /**
- * Fetches and parses the files behind a Moodle `mod/resource` activity URL.
+ * Fetches and parses a Moodle `mod/resource` activity or a file from a
+ * `mod/folder` listing (`/pluginfile.php/.../mod_folder/content/...`).
  *
  * Resource links either redirect directly to a file or render an intermediate
  * wrapper page containing embedded `/pluginfile.php/` URLs.
  */
 export async function readFiles(url: string, download = false): Promise<FileReadResult> {
-  const activity = parseActivityUrl(url);
+  const target = parseReadUrl(url);
   const { browser, page } = await openSession();
   try {
     await gotoAuthed(page, "/my/");
-    const target = await resolveFiles(page, activity);
+    if (target.kind === "folderFile") {
+      const fetched = await fetchFile(page, target.url.toString());
+      const name = downloadName(fetched) || folderFilePath(target.url).split("/").pop() || "download";
+      return { activity: name, files: [await downloadFile(page, { name, url: target.url.toString(), fetched }, download)] };
+    }
+    const resolved = await resolveFiles(page, target.url);
     const files: CourseFile[] = [];
-    for (const file of target.files) files.push(await downloadFile(page, file, download));
-    return { activity: target.activity, files };
+    for (const file of resolved.files) files.push(await downloadFile(page, file, download));
+    return { activity: resolved.activity, files };
   } finally {
     await browser.close();
   }
 }
 
-function parseActivityUrl(url: string): URL {
+/**
+ * Lists the files in a Moodle `mod/folder` activity by URL or course-module id.
+ * Does not download file contents; pass a returned file URL to `readFiles`.
+ */
+export async function listFolder(input: { url?: string; id?: number }): Promise<FolderListing> {
+  const activity = parseFolderUrl(input);
+  const { browser, page } = await openSession();
+  try {
+    await gotoAuthed(page, "/my/");
+    const fetched = await fetchFile(page, activity.toString());
+    const html = Buffer.from(fetched.base64, "base64").toString("utf8");
+    const listing = await page.evaluate((pageHtml: string, baseUrl: string, siteOrigin: string) => {
+      const document = new DOMParser().parseFromString(pageHtml, "text/html");
+      const sizePattern = /(\d+(?:[.,]\d+)?\s*(?:B|KB|MB|GB|KiB|MiB|GiB|bytes))\b/i;
+      const seen = new Set<string>();
+      const files: { name: string; url: string; size?: string }[] = [];
+      for (const link of document.querySelectorAll<HTMLAnchorElement>("a[href]")) {
+        let target: URL;
+        try {
+          target = new URL(link.href, baseUrl);
+        } catch {
+          continue;
+        }
+        if (target.origin !== siteOrigin) continue;
+        const path = target.pathname.startsWith("/pluginfile.php/")
+          ? target.pathname
+          : (target.pathname === "/pluginfile.php" ? (target.searchParams.get("file") ?? "") : "");
+        if (!/(?:^|\/)mod_folder\/content(?:\/|$)/.test(path)) continue;
+        if (target.searchParams.has("preview")) continue;
+        const href = target.href;
+        if (seen.has(href)) continue;
+        seen.add(href);
+        const name = link.textContent?.replace(/\s+/g, " ").trim() ?? "";
+        const context = (link.closest("li, tr, .fp-filename-icon") ?? link.parentElement)?.textContent ?? "";
+        const size = sizePattern.exec(context)?.[1]?.replace(/\s+/g, " ").trim();
+        files.push({ name, url: href, size });
+      }
+      const download = document.querySelector<HTMLAnchorElement>('a[href*="/mod/folder/download_folder.php"], a[href*="/mod/folder/download.php"]')
+        ?? document.querySelector<HTMLFormElement>('form[action*="/mod/folder/download_folder.php"], form[action*="/mod/folder/download.php"]');
+      let downloadUrl: string | undefined;
+      if (download) {
+        try {
+          const href = "href" in download && download.href
+            ? download.href
+            : (download as HTMLFormElement).action;
+          const parsed = new URL(href, baseUrl);
+          for (const input of download.querySelectorAll<HTMLInputElement>("input[type='hidden']")) {
+            if (input.name && !parsed.searchParams.has(input.name)) parsed.searchParams.set(input.name, input.value);
+          }
+          if (parsed.origin === siteOrigin) downloadUrl = parsed.href;
+        } catch {
+          // Ignore malformed download buttons.
+        }
+      }
+      const headingText = (selector: string) => {
+        for (const element of document.querySelectorAll(selector)) {
+          if (element.classList.contains("visually-hidden") || element.closest(".visually-hidden")) continue;
+          const text = element.textContent?.replace(/\s+/g, " ").trim();
+          if (text) return text;
+        }
+        return "";
+      };
+      return {
+        activity: headingText("h1") || headingText(".page-header-headings") || headingText("h2"),
+        files,
+        downloadUrl,
+        login: Boolean(document.querySelector('form#login, form[action*="/login/"], input[type="password"]')),
+      };
+    }, html, fetched.finalUrl, SITE_ORIGIN);
+    if (listing.login) throw new SessionExpiredError();
+    return {
+      activity: listing.activity,
+      files: listing.files.map((file) => {
+        const parsed = new URL(file.url);
+        const path = folderFilePath(parsed);
+        return {
+          name: file.name || path.split("/").pop() || path,
+          path,
+          url: file.url,
+          size: file.size,
+        };
+      }),
+      downloadUrl: listing.downloadUrl,
+    };
+  } finally {
+    await browser.close();
+  }
+}
+
+function parseReadUrl(url: string): { kind: "resource" | "folderFile"; url: URL } {
   let parsed: URL;
   try {
     parsed = new URL(url);
   } catch {
-    throw new Error("Not a valid URL. Pass a resource URL from lmcore_course_contents.");
+    throw new Error("Not a valid URL. Pass a resource URL from lmcore_course_contents, or a file URL from lmcore_folder.");
   }
-  if (parsed.origin !== SITE_ORIGIN || !RESOURCE_PATH.test(parsed.pathname)) {
-    const folder = parsed.origin === SITE_ORIGIN && parsed.pathname === "/mod/folder/view.php";
+  if (parsed.origin === SITE_ORIGIN && RESOURCE_PATH.test(parsed.pathname)) {
+    return { kind: "resource", url: parsed };
+  }
+  if (isFolderFileUrl(parsed) && !parsed.searchParams.has("preview")) {
+    return { kind: "folderFile", url: parsed };
+  }
+  if (parsed.origin === SITE_ORIGIN && FOLDER_PATH.test(parsed.pathname)) {
     throw new Error(
-      folder
-        ? "Folder activities (/mod/folder/view.php) are not supported. Open the folder in a browser; this tool only accepts resource URLs (/mod/resource/view.php) from lmcore_course_contents."
-        : "Only resource links on Learning Mall Core can be read. Pass a resource URL from lmcore_course_contents.",
+      "Folder activities are listed with lmcore_folder. Pass a file URL from that listing to lmcore_read_file.",
     );
   }
-  return parsed;
+  throw new Error(
+    "Only resource or folder file links on Learning Mall Core can be read. Pass a resource URL from lmcore_course_contents, or a file URL from lmcore_folder.",
+  );
+}
+
+function parseFolderUrl(input: { url?: string; id?: number }): URL {
+  if (input.url) {
+    let parsed: URL;
+    try {
+      parsed = new URL(input.url);
+    } catch {
+      throw new Error("Not a valid URL. Pass a folder URL from lmcore_course_contents, or a folder id.");
+    }
+    if (parsed.origin !== SITE_ORIGIN || !FOLDER_PATH.test(parsed.pathname)) {
+      throw new Error(
+        "Only folder links on Learning Mall Core can be listed. Pass a folder URL (/mod/folder/view.php?id=...) from lmcore_course_contents, or the folder's course-module id.",
+      );
+    }
+    const id = Number(parsed.searchParams.get("id") ?? 0);
+    if (!Number.isSafeInteger(id) || id <= 0) {
+      throw new Error("The folder URL is missing a valid id parameter.");
+    }
+    if (input.id != null && input.id !== id) {
+      throw new Error("The folder url and id refer to different activities.");
+    }
+    return parsed;
+  }
+  if (input.id != null) {
+    if (!Number.isSafeInteger(input.id) || input.id <= 0) {
+      throw new Error("Provide a positive folder course-module id.");
+    }
+    return new URL(`/mod/folder/view.php?id=${input.id}`, BASE_URL);
+  }
+  throw new Error("Provide a folder URL or id.");
 }
 
 interface ResolvedFile {

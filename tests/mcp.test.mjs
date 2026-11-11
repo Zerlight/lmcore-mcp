@@ -7,7 +7,7 @@ import test from "node:test";
 import { Client } from "@modelcontextprotocol/client";
 import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
 
-test("stdio registers seven tools and reports session failures as tool errors", { timeout: 15_000 }, async () => {
+test("stdio registers eight tools and reports session failures as tool errors", { timeout: 15_000 }, async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "lmcore-mcp-test-"));
   const client = new Client({ name: "lmcore-regression", version: "1.0.0" });
   const transport = new StdioClientTransport({
@@ -24,6 +24,7 @@ test("stdio registers seven tools and reports session failures as tool errors", 
       ["lmcore_courses", {}],
       ["lmcore_deadlines", {}],
       ["lmcore_course_contents", { courseId: 1 }],
+      ["lmcore_folder", { id: 1 }],
       ["lmcore_read_file", { url: "https://core.xjtlu.edu.cn/mod/resource/view.php?id=1" }],
       ["lmcore_assignments", { courseId: 1 }],
       ["lmcore_grades", { courseId: 1 }],
@@ -36,6 +37,10 @@ test("stdio registers seven tools and reports session failures as tool errors", 
     assert.match(readFile.description, /multimodal input/);
     assert.match(readFile.description, /download to true/);
     assert.match(readFile.description, /does not attach the file.*automatically/);
+    assert.match(readFile.description, /lmcore_folder/);
+    const folder = tools.find(({ name }) => name === "lmcore_folder");
+    assert.match(folder.description, /mod\/folder/);
+    assert.match(folder.description, /lmcore_read_file/);
     for (const [name, args] of calls) {
       const result = await client.callTool({ name, arguments: args });
       assert.equal(result.isError, true, name);
@@ -50,6 +55,8 @@ test("stdio registers seven tools and reports session failures as tool errors", 
       ["lmcore_notifications", { limit: 0 }],
       ["lmcore_notifications", { limit: 51 }],
       ["lmcore_course_contents", { courseId: "1" }],
+      ["lmcore_folder", { id: "1" }],
+      ["lmcore_folder", { id: 0 }],
     ]) {
       try {
         const result = await client.callTool({ name, arguments: args });
