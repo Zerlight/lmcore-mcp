@@ -25,21 +25,27 @@ const authenticatedMenu = `<div class="usermenu">
 mock.module(new URL("../build/config.js", import.meta.url), {
   exports: { ...config, SESSION_PATH: path.join(directory, "session.json") },
 });
+const fixturePage = {
+  url: () => `${origin}/my/`,
+  setRequestInterception: async () => {},
+  on: () => {},
+  goto: async () => null,
+  close: async () => {},
+  evaluate: async (predicate, ...args) => {
+    loginPredicate = predicate;
+    loginArguments = args;
+    return true;
+  },
+  createCDPSession: async () => ({
+    send: async () => ({ cookies: [{ name: "MoodleSession", domain: "login.moodle.test", value: "fixture", path: "/" }] }),
+  }),
+};
 mock.module("puppeteer-core", {
   exports: {
     default: {
       connect: async () => ({
-        pages: async () => [{
-          url: () => `${origin}/my/`,
-          evaluate: async (predicate, ...args) => {
-            loginPredicate = predicate;
-            loginArguments = args;
-            return true;
-          },
-          createCDPSession: async () => ({
-            send: async () => ({ cookies: [{ name: "MoodleSession", domain: "login.moodle.test", value: "fixture", path: "/" }] }),
-          }),
-        }],
+        newPage: async () => fixturePage,
+        pages: async () => [fixturePage],
         disconnect: async () => {},
       }),
     },
@@ -48,10 +54,15 @@ mock.module("puppeteer-core", {
 mock.module("node:child_process", {
   exports: {
     spawn: (_executable, args) => {
-      chromeArguments = args;
       const child = new EventEmitter();
-      const profile = args.find((arg) => arg.startsWith("--user-data-dir=")).split("=")[1];
-      fs.writeFileSync(path.join(profile, "DevToolsActivePort"), "9222\n/devtools/browser/fixture");
+      const capture = args.includes("--remote-debugging-port=0");
+      if (capture) {
+        const profile = args.find((arg) => arg.startsWith("--user-data-dir=")).split("=")[1];
+        fs.writeFileSync(path.join(profile, "DevToolsActivePort"), "9222\n/devtools/browser/fixture");
+      } else {
+        // The interactive sign-in window: it is never debugged, so this is where SSO runs.
+        chromeArguments = args;
+      }
       child.pid = 12345;
       child.exitCode = null;
       child.signalCode = null;
@@ -59,7 +70,10 @@ mock.module("node:child_process", {
         queueMicrotask(() => { child.signalCode = signal; child.emit("exit", null, signal); });
         return true;
       };
-      queueMicrotask(() => child.emit("spawn"));
+      queueMicrotask(() => {
+        child.emit("spawn");
+        if (!capture) queueMicrotask(() => { child.exitCode = 0; child.emit("exit", 0, null); });
+      });
       return child;
     },
   },

@@ -64,9 +64,9 @@ pnpm run login
 > [!WARNING]
 > 请务必执行 `pnpm run login`，不要省略 `run`（`pnpm login` 是 pnpm 内置的 npm 仓库登录命令）。
 
-1. 命令会使用独立临时配置目录弹出一个普通 Chrome 窗口并打开 Learning Mall 登录页（不会影响你日常使用的 Chrome 窗口或资料）。
-2. 请在 5 分钟内使用西浦账号完成 SSO 登录。
-3. 页面跳转回 Learning Mall 后，程序会自动将 Cookie 写入 `~/.config/lmcore-mcp/session.json`（权限 `0600`）并关闭窗口。
+1. 命令会使用独立临时配置目录弹出一个普通 Chrome 窗口并打开 Learning Mall（不会影响你日常使用的 Chrome 窗口或资料）。该窗口**不**开启远程调试，也不挂接任何自动化工具，因此西浦 SSO 页面可以正常显示。
+2. 使用西浦账号完成 SSO 登录。看到 Learning Mall 主页（Dashboard）后，**关闭该窗口**（macOS 上关闭最后一个窗口不会退出 Chrome，请按 <kbd>Cmd</kbd>+<kbd>Q</kbd> 退出）。请勿强制结束进程：Chrome 会在正常退出时把 Cookie 写入临时配置目录。时限为 10 分钟。
+3. 随后程序以无头模式重新打开同一配置目录（必要时回退为普通窗口），仅加载 Learning Mall 主页并确认登录状态，然后将 Cookie 写入 `~/.config/lmcore-mcp/session.json`（权限 `0600`），并删除临时配置目录。此步骤会拦截跳转到其他域名（包括 SSO）的导航；若主页被重定向到登录页，命令会提示 “Sign-in did not complete; run login again.” 并退出。
 
 当 Moodle 会话过期时，工具调用会返回明确提示，届时重新运行 `pnpm run login` 即可。
 

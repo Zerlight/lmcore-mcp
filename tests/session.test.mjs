@@ -8,29 +8,58 @@ import test from "node:test";
 
 let moduleId = 0;
 
+function fakeChrome({ onKill } = {}) {
+  const child = new EventEmitter();
+  child.pid = 12345;
+  child.exitCode = null;
+  child.signalCode = null;
+  child.kill = (signal) => {
+    if (onKill) return onKill(child, signal);
+    queueMicrotask(() => {
+      child.signalCode = signal;
+      child.emit("exit", null, signal);
+    });
+    return true;
+  };
+  queueMicrotask(() => child.emit("spawn"));
+  return child;
+}
+
 async function loadSession(t, {
-  baseUrl = "https://moodle.example.edu:8443", cookies = [], spawn,
-  evaluate = async () => true, url = () => `${baseUrl}/my/`, pages,
+  baseUrl = "https://moodle.example.edu:8443", cookies = [], spawn, signIn,
+  evaluate = async () => true, url = () => `${baseUrl}/my/`, goto, isLoginUrl = () => false,
 } = {}) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "lmcore-session-test-"));
   const sessionPath = path.join(directory, "session.json");
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
-  const state = { killed: false, disconnected: false, profile: undefined, connectCalls: 0, cookieReads: 0 };
+  const state = {
+    killed: false, disconnected: false, profile: undefined, connectCalls: 0, cookieReads: 0,
+    launches: [], preferences: undefined, aborted: [], continued: [], closedPages: 0,
+  };
+  let requestHandler;
   const page = {
     url,
     evaluate,
+    setRequestInterception: async () => {},
+    on: (event, handler) => { if (event === "request") requestHandler = handler; },
+    goto: async (target) => {
+      if (goto) return goto(target, (request) => requestHandler(request));
+      return null;
+    },
+    close: async () => { state.closedPages++; },
     createCDPSession: async () => ({ send: async () => {
       state.cookieReads++;
       return { cookies };
     } }),
   };
+  const restoredTab = { close: async () => { state.closedPages++; } };
   t.mock.module(new URL("../build/config.js", import.meta.url).href, {
     exports: {
       BASE_URL: baseUrl,
       SITE_HOST: new URL(baseUrl).host,
       SESSION_PATH: sessionPath,
       CHROME_PATH: path.join(directory, "nonexistent-chrome"),
-      isLoginUrl: () => false,
+      isLoginUrl,
     },
   });
   t.mock.module("puppeteer-core", {
@@ -39,7 +68,8 @@ async function loadSession(t, {
         connect: async () => {
           state.connectCalls++;
           return {
-            pages: pages ?? (async () => [page]),
+            newPage: async () => page,
+            pages: async () => [restoredTab, page],
             disconnect: async () => { state.disconnected = true; },
           };
         },
@@ -50,24 +80,27 @@ async function loadSession(t, {
     exports: {
       spawn: (executable, args, options) => {
         assert.ok(args.includes("--disable-http2"));
-      assert.ok(args.includes("--remote-debugging-port=0"));
         state.profile = args.find((arg) => arg.startsWith("--user-data-dir=")).split("=")[1];
-      fs.writeFileSync(path.join(state.profile, "DevToolsActivePort"), "9222\n/devtools/browser/test");
+        const phase = args.includes("--remote-debugging-port=0") ? "capture" : "signIn";
+        state.launches.push({ phase, args });
+        if (phase === "signIn") {
+          state.preferences = JSON.parse(fs.readFileSync(path.join(state.profile, "Default", "Preferences"), "utf8"));
+          if (signIn) return signIn(executable, args, options);
+          // The user signs in and closes the window.
+          const child = fakeChrome();
+          child.once("spawn", () => queueMicrotask(() => { child.exitCode = 0; child.emit("exit", 0, null); }));
+          return child;
+        }
+        fs.writeFileSync(path.join(state.profile, "DevToolsActivePort"), "9222\n/devtools/browser/test");
         if (spawn) return spawn(executable, args, options);
-        const child = new EventEmitter();
-        child.pid = 12345;
-        child.exitCode = null;
-        child.signalCode = null;
-        child.kill = (signal) => {
+        return fakeChrome({ onKill: (child, signal) => {
           state.killed = signal === "SIGTERM";
           queueMicrotask(() => {
             child.signalCode = signal;
             child.emit("exit", null, signal);
           });
           return true;
-        };
-        queueMicrotask(() => child.emit("spawn"));
-        return child;
+        } });
       },
     },
   });
@@ -77,6 +110,17 @@ async function loadSession(t, {
     directory,
     sessionPath,
   };
+}
+
+/** Advances mocked timers until `promise` settles. */
+async function drive(t, promise, step = 1000) {
+  let settled = false;
+  promise.then(() => { settled = true; }, () => { settled = true; });
+  for (let i = 0; i < 10_000 && !settled; i++) {
+    await new Promise((resolve) => setImmediate(resolve));
+    if (!settled) t.mock.timers.tick(step);
+  }
+  return promise;
 }
 
 function cookie(name, domain) {
@@ -126,7 +170,7 @@ test("XJTLU login also keeps SSO cookies without accepting similarly named domai
   assert.deepEqual(saved.cookies.map(({ name }) => name), ["MoodleSession", "sso", "shared"]);
 });
 
-test("login keeps Chrome open for a guest session until authentication is confirmed", async (t) => {
+test("login waits for the dashboard to confirm authentication before reading cookies", async (t) => {
   t.mock.timers.enable({ apis: ["setTimeout"] });
   const checked = deferred();
   let authenticated = false;
@@ -209,20 +253,15 @@ test("login ignores an authentication result from a page that navigated during e
   assert.equal(state.cookieReads, 1);
 });
 
-test("login timeout preserves the previously saved session", async (t) => {
+test("an unconfirmed sign-in preserves the previously saved session", async (t) => {
   t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
-  const checked = deferred();
   const { session, state, sessionPath } = await loadSession(t, {
     cookies: [cookie("MoodleSession", "moodle.example.edu")],
-    evaluate: async () => { checked.resolve(); return false; },
+    evaluate: async () => false,
   });
   const previousSession = JSON.stringify({ format: "lmcore-mcp/session", cookies: [cookie("MoodleSession", "moodle.example.edu")] });
   fs.writeFileSync(sessionPath, previousSession, { mode: 0o600 });
-  const login = assert.rejects(session.interactiveLogin({ log: () => {} }), /Timed out waiting for login/);
-  await checked.promise;
-  await new Promise((resolve) => setImmediate(resolve));
-  t.mock.timers.tick(5 * 60_000);
-  await login;
+  await assert.rejects(drive(t, session.interactiveLogin({ log: () => {} })), /Sign-in did not complete \(not signed in\); run login again/);
   assert.equal(fs.readFileSync(sessionPath, "utf8"), previousSession);
   assert.equal(state.cookieReads, 0);
   assert.equal(state.disconnected, true);
@@ -232,7 +271,8 @@ test("login timeout preserves the previously saved session", async (t) => {
 
 test("login failure disconnects the browser and removes its temporary profile", async (t) => {
   const { session, state, sessionPath } = await loadSession(t);
-  await assert.rejects(session.interactiveLogin({ log: () => {} }), /no MoodleSession cookie/);
+  await assert.rejects(session.interactiveLogin({ log: () => {} }), /Sign-in did not complete \(no MoodleSession cookie\); run login again/);
+  assert.deepEqual(state.launches.map(({ phase }) => phase), ["signIn", "capture", "capture"]);
   assert.equal(state.disconnected, true);
   assert.equal(state.killed, true);
   assert.equal(fs.existsSync(state.profile), false);
@@ -271,7 +311,7 @@ test("failed atomic replacement preserves the old session and removes its tempor
 });
 
 test("a missing Chrome executable rejects promptly and removes its temporary profile", async (t) => {
-  const { session, state } = await loadSession(t, { spawn: realSpawn });
+  const { session, state } = await loadSession(t, { signIn: realSpawn });
   await assert.rejects(session.interactiveLogin({ log: () => {} }), { code: "ENOENT" });
   assert.equal(state.connectCalls, 0);
   assert.equal(fs.existsSync(state.profile), false);
@@ -279,7 +319,7 @@ test("a missing Chrome executable rejects promptly and removes its temporary pro
 
 test("a synchronous Chrome launch failure also removes its temporary profile", async (t) => {
   const { session, state } = await loadSession(t, {
-    spawn: () => { throw new Error("simulated spawn failure"); },
+    signIn: () => { throw new Error("simulated spawn failure"); },
   });
   await assert.rejects(session.interactiveLogin({ log: () => {} }), /simulated spawn failure/);
   assert.equal(fs.existsSync(state.profile), false);
@@ -390,6 +430,120 @@ test("login stops waiting after SIGKILL and preserves a profile still in use", a
   await login;
   assert.deepEqual(signals, ["SIGTERM", "SIGKILL"]);
   assert.equal(fs.existsSync(state.profile), true);
+});
+
+test("sign-in Chrome runs without DevTools; only the capture launch enables debugging", async (t) => {
+  const { session, state } = await loadSession(t, { cookies: [cookie("MoodleSession", "moodle.example.edu")] });
+  await session.interactiveLogin({ log: () => {} });
+  const [signIn, capture, ...rest] = state.launches;
+  assert.equal(rest.length, 0);
+  assert.equal(signIn.phase, "signIn");
+  assert.ok(!signIn.args.some((arg) => arg.startsWith("--remote-debugging") || arg.startsWith("--headless")
+    || arg.includes("automation")));
+  assert.equal(signIn.args.at(-1), "https://moodle.example.edu:8443/my/");
+  assert.deepEqual(state.preferences, { session: { restore_on_startup: 1 } });
+  assert.ok(capture.args.includes("--headless=new"));
+  assert.ok(capture.args.includes("--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE moodle.example.edu"));
+  assert.equal(capture.args.at(-1), "about:blank");
+  assert.equal(capture.args.find((arg) => arg.startsWith("--user-data-dir=")), signIn.args.find((arg) => arg.startsWith("--user-data-dir=")));
+  assert.equal(state.closedPages, 1, "restored tabs are closed before the dashboard loads");
+});
+
+test("capture blocks redirects away from Moodle and reports an incomplete sign-in", async (t) => {
+  const requests = [];
+  const { session, state, sessionPath } = await loadSession(t, {
+    cookies: [cookie("MoodleSession", "moodle.example.edu")],
+    goto: async (target, emit) => {
+      for (const href of [target, "https://sso.example.edu/esc-sso/login/page"]) {
+        const request = {
+          url: () => href, isNavigationRequest: () => true,
+          abort: async () => { requests.push(["abort", href]); },
+          continue: async () => { requests.push(["continue", href]); },
+        };
+        emit(request);
+      }
+      throw new Error("net::ERR_FAILED");
+    },
+  });
+  await assert.rejects(session.interactiveLogin({ log: () => {} }), /Sign-in did not complete \(redirected to sign-in\); run login again/);
+  assert.deepEqual(requests.slice(0, 2), [
+    ["continue", "https://moodle.example.edu:8443/my/"],
+    ["abort", "https://sso.example.edu/esc-sso/login/page"],
+  ]);
+  assert.deepEqual(state.launches.map(({ phase, args }) => [phase, args.includes("--headless=new")]),
+    [["signIn", false], ["capture", true], ["capture", false]]);
+  assert.equal(state.cookieReads, 0);
+  assert.equal(fs.existsSync(sessionPath), false);
+  assert.equal(fs.existsSync(state.profile), false);
+});
+
+test("capture rejects a Moodle login page instead of waiting", async (t) => {
+  const { session, state } = await loadSession(t, {
+    cookies: [cookie("MoodleSession", "moodle.example.edu")],
+    url: () => "https://moodle.example.edu:8443/login/index.php",
+    isLoginUrl: (url) => url.includes("/login/"),
+  });
+  await assert.rejects(session.interactiveLogin({ log: () => {} }), /Sign-in did not complete/);
+  assert.equal(state.cookieReads, 0);
+});
+
+test("headed capture is used when the headless check cannot find the session", async (t) => {
+  let captures = 0;
+  const { session, state } = await loadSession(t, {
+    cookies: [cookie("MoodleSession", "moodle.example.edu")],
+    url: () => (captures === 1 ? "https://moodle.example.edu:8443/login/index.php" : "https://moodle.example.edu:8443/my/"),
+    isLoginUrl: (url) => url.includes("/login/"),
+    spawn: () => {
+      captures++;
+      return fakeChrome();
+    },
+  });
+  const saved = await session.interactiveLogin({ log: () => {} });
+  assert.equal(saved.cookies[0].name, "MoodleSession");
+  assert.deepEqual(state.launches.map(({ args }) => args.includes("--headless=new")), [false, true, false]);
+});
+
+test("closing the sign-in window before Chrome finishes starting reports a launch failure", async (t) => {
+  const { session, state } = await loadSession(t, {
+    signIn: () => {
+      const child = fakeChrome();
+      child.once("spawn", () => queueMicrotask(() => { child.exitCode = 21; child.emit("exit", 21, null); }));
+      return child;
+    },
+  });
+  await assert.rejects(session.interactiveLogin({ log: () => {} }), /Chrome exited immediately \(code 21\)/);
+  assert.equal(state.connectCalls, 0);
+  assert.equal(fs.existsSync(state.profile), false);
+});
+
+test("sign-in window left open times out, stops Chrome, and removes the profile", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
+  const signals = [];
+  const { session, state } = await loadSession(t, {
+    signIn: () => fakeChrome({ onKill: (child, signal) => {
+      signals.push(signal);
+      queueMicrotask(() => { child.signalCode = signal; child.emit("exit", null, signal); });
+      return true;
+    } }),
+  });
+  await assert.rejects(drive(t, session.interactiveLogin({ log: () => {} }), 60_000), /Timed out waiting for login/);
+  assert.deepEqual(signals, ["SIGTERM"]);
+  assert.equal(state.connectCalls, 0);
+  assert.equal(fs.existsSync(state.profile), false);
+});
+
+test("capture Chrome exiting mid-check aborts with a clear message", async (t) => {
+  const { session, state } = await loadSession(t, {
+    cookies: [cookie("MoodleSession", "moodle.example.edu")],
+    spawn: () => {
+      const child = fakeChrome();
+      child.once("spawn", () => setImmediate(() => { child.exitCode = 1; child.emit("exit", 1, null); }));
+      return child;
+    },
+    goto: () => new Promise(() => {}),
+  });
+  await assert.rejects(session.interactiveLogin({ log: () => {} }), /Chrome exited while the session was being checked/);
+  assert.equal(fs.existsSync(state.profile), false);
 });
 
 test("session recovery advice uses the package script command", async (t) => {

@@ -64,9 +64,9 @@ pnpm run login
 > [!WARNING]
 > Always run `pnpm run login` (not `pnpm login`, which is pnpm's built-in command for authenticating with an npm registry).
 
-1. A regular Chrome window will open to the Learning Mall login page using a temporary browser profile.
-2. Sign in with your XJTLU account (waiting up to 5 minutes).
-3. Once redirected back to Learning Mall, your session cookies are saved to `~/.config/lmcore-mcp/session.json` (permissions `0600`) and the window closes automatically.
+1. A regular Chrome window opens Learning Mall with a temporary browser profile. This window has **no** remote debugging or automation attached, so the XJTLU SSO page renders normally.
+2. Sign in with your XJTLU account. When the Learning Mall dashboard appears, **close the window** (on macOS, quit Chrome with <kbd>Cmd</kbd>+<kbd>Q</kbd>, since closing the last window does not exit Chrome). Do not force-quit it; Chrome saves cookies to the profile as it exits. You have 10 minutes.
+3. The helper then reopens the same profile in headless Chrome (falling back to a regular window if needed), loads only the Learning Mall dashboard, confirms you are signed in, saves your session cookies to `~/.config/lmcore-mcp/session.json` (permissions `0600`), and deletes the temporary profile. Navigation to any other host, including SSO, is blocked in this step; if the dashboard redirects to sign-in, the command exits with "Sign-in did not complete; run login again."
 
 When your Moodle session eventually expires, tools will prompt you to run `pnpm run login` again.
 
